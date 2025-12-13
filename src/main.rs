@@ -1,37 +1,21 @@
-use std::io;
-use primitive_types::U256;
-use std::time::Instant;
+mod primes;
+
+const SEED: u64 = 958745;
 
 fn main() {
-    println!("Generate the nth fibonacci number");
-    let n: i32 = loop {
-        let mut input = String::new();
+    let bits = 512;
 
-        io::stdin()
-            .read_line(&mut input)
-            .expect("Failed to read line");
-        
-        match input.trim().parse() {
-            Ok(num) => if num < 1 {println!("Number too small!")} else if num > 369 {println!("Number too large!")} else { break num },
-            Err(_) => {
-                println!("Please type a number!");
-            }
-        };
-    };
-    let n = n as u16;
+    println!("Generating {} bit primes...", bits);
 
-    println!("generating the {n}th fibonacci number");
-    let (nth_fibonacci, time) = fibonacci(n);
-    println!("The {n}th fibonacci number is {}\nCalculation took {} ns", nth_fibonacci, time);
-}
+    let mut stream1 = primes::SeededStream::new(bits, SEED);
+    // let mut stream2 = primes::SeededStream::new(bits, SEED);
 
-fn fibonacci(n: u16) -> (U256, u128) {
-    let mut nums: [U256; 2] = [U256::one(); 2];
-    let start = Instant::now();
-    for _i in 0..(n-1) {
-        nums = [nums[1], nums[0]+nums[1]];
+    let mut i = 1;
+    loop {
+        let prime1 = stream1.next().unwrap();
+        // let prime2 = stream2.next().unwrap();
+        // assert_eq!(prime1, prime2);
+        println!("matching prime #{}: {}", i, prime1);
+        i += 1;
     }
-    let duration = start.elapsed();
-
-    (nums[0], duration.as_nanos())
 }
