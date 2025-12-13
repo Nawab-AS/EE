@@ -8,3 +8,7 @@ glass_pumpkin = "1.9.0"
 num-bigint = "0.4.6"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
