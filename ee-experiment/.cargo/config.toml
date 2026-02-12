@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: MIT
+#
+# Copyright (c) 2021–2024 The rp-rs Developers
+# Copyright (c) 2021 rp-rs organization
+# Copyright (c) 2025 Raspberry Pi Ltd.
+#
+# Cargo Configuration for the https://github.com/rp-rs/rp-hal.git repository.
+#
+# You might want to make a similar file in your own repository if you are
+# writing programs for Raspberry Silicon microcontrollers.
+#
+
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+rustflags = [
+    "-C", "link-arg=--nmagic",
+    "-C", "link-arg=-Tlink.x",
+    "-C", "target-cpu=cortex-m33",
+]
+runner = "bash .cargo/flash.sh"
+
+
+[env]
+DEFMT_LOG = "debug"
