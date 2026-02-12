@@ -1,2 +1,6 @@
-/target
-.replit
+**/debug/
+**/target/
+Cargo.lock
+.vscode/*
+lookup.rs
+lookup.backup.rs
