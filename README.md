@@ -1,4 +1,4 @@
-# EE
+# Extended Essay
 
 The source code for my IBDP computer science EE.
 Refer to EE for methodology behind code.

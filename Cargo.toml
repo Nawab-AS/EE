@@ -1,0 +1,7 @@
+# for VSCode rust-analyzer linter
+[workspace]
+resolver = "3"
+members = [
+    "primegen",
+    "ee-experiment"
+]
