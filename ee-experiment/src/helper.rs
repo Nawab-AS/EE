@@ -1,6 +1,10 @@
 use primitive_types::{U512, U256};
+use cortex_m::asm;
+
+use crate::uprint;
 
 pub fn exit() -> ! {
+    uprint!("Exiting...\n");
     loop {}
 }
 

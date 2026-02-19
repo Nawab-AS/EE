@@ -111,7 +111,7 @@ macro_rules! uprint {
                 usb.poll();
 
                 // small delay to avoid race conditions
-                asm::delay(10000);
+                asm::delay(1_000);
             }
         });
     }};

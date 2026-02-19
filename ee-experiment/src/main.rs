@@ -5,7 +5,6 @@
 extern crate alloc;
 use core::usize;
 
-use alloc::format;
 use linked_list_allocator::LockedHeap;
 
 #[global_allocator]
@@ -36,7 +35,7 @@ mod rsa;
 // consts
 static mut USB_BUS: Option<usb_device::bus::UsbBusAllocator<hal::usb::UsbBus>> = None;
 const XTAL_FREQ_HZ: u32 = 12_000_000;
-const TRIALS_PER_KEY: usize = 100;
+const TRIALS_PER_KEY: usize = 1;
 
 #[unsafe(link_section = ".start_block")]
 #[used]
@@ -104,10 +103,12 @@ fn main() -> ! {
 
     // MAIN PROGRAM
     const TOTAL_SIZES: u16 = ((lookup::PRIME_RANGE[1] - lookup::PRIME_RANGE[0]) / 8 + 1) as u16;
-    let mut results = [(0u32, 0u32); lookup::TRIALS as usize];
-    for bits in 0..TOTAL_SIZES {
+    let mut results = [(0u32, 0u32, 0u16, 0u16); lookup::TRIALS as usize]; // (ECC time, RSA time, ECC fails, RSA fails)
+    for bits_ in 0..TOTAL_SIZES {
+        let bits = bits_ * 8 + lookup::PRIME_RANGE[0];
+        uprint!("Processing: {} bits\n", bits);
         for i in 0..(lookup::TRIALS as u16) {
-            uprint!("Processing lookup table for {} bits, trial #{}\n", bits, i+1);
+            uprint!("  Trial #{}...\n", i + 1);
             let mut ecc_time: u64 = 0;
             let mut rsa_time: u64 = 0;
             
@@ -115,31 +116,35 @@ fn main() -> ! {
             for _ in 0..TRIALS_PER_KEY {
                 // ECC
                 let mut start = cp.DWT.cyccnt.read();
-                ecc::ECDH(trial_data.ecc);
+                if !ecc::ECDH(trial_data.ecc) {
+                    results[i as usize].2 += 1;
+                    uprint!("[ERROR] ECC key exchange failed");
+                }
                 let mut end = cp.DWT.cyccnt.read();
                 ecc_time += end.wrapping_sub(start) as u64;
 
-                asm::delay(10000); // Cooldown
 
                 // RSA
                 start = cp.DWT.cyccnt.read();
-                rsa::KEY_TRANSPORT(trial_data.rsa);
+                if !rsa::KEY_TRANSPORT(trial_data.rsa) {
+                    results[i as usize].3 += 1;
+                    uprint!("[ERROR] RSA key transport failed");
+                }
                 end = cp.DWT.cyccnt.read();
                 rsa_time += end.wrapping_sub(start) as u64;
             }
-            results[i as usize] = ((ecc_time / (TRIALS_PER_KEY as u64)) as u32, (rsa_time / (TRIALS_PER_KEY as u64)) as u32);
+            results[i as usize] = ((ecc_time / (TRIALS_PER_KEY as u64)) as u32, (rsa_time / (TRIALS_PER_KEY as u64)) as u32, results[i as usize].2, results[i as usize].3);
         }
         
         // Send results for this key size
-        let mut result_str = format!("=== Results for {} bits ===\n", bits);
+        uprint!("=== Results for {} bits ===\n", bits);
         
         for i in 0..(results.len()) {
-            result_str += &format!("Trial #{}: ECC = {}, RSA = {}\n", i % (lookup::TRIALS as usize) + 1, results[i].0, results[i].1);
+            uprint!("Trial #{}: ECC = {}, RSA = {}, ECC fails = {}, RSA fails = {}\n", i % (lookup::TRIALS as usize) + 1, results[i].0, results[i].1, results[i].2, results[i].3);
         }
+        uprint!("\n\n");
 
-        uprint!("{}\n\n", result_str);
-
-        results = [(0u32, 0u32); lookup::TRIALS as usize]; // reset for next key size
+        results = [(0u32, 0u32, 0u16, 0u16); lookup::TRIALS as usize]; // reset for next key size
     }
 
     uprint!("=== Experiment Complete ===\n");
