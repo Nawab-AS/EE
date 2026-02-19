@@ -24,6 +24,6 @@ linked_list_allocator = "0.10"
 primitive-types = { version = "0.12", default-features = false }
 
 [profile.release]
-lto = true
+lto = "fat"
 codegen-units = 1
-opt-level = "s"
+opt-level = 3

@@ -35,7 +35,7 @@ mod rsa;
 // consts
 static mut USB_BUS: Option<usb_device::bus::UsbBusAllocator<hal::usb::UsbBus>> = None;
 const XTAL_FREQ_HZ: u32 = 12_000_000;
-const TRIALS_PER_KEY: usize = 1;
+const TRIALS_PER_KEY: usize = 100;
 
 #[unsafe(link_section = ".start_block")]
 #[used]

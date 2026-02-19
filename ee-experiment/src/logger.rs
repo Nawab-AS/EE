@@ -108,9 +108,10 @@ macro_rules! uprint {
         cortex_m::interrupt::free(|cs| {
             if let Some(ref mut usb) = *$crate::logger::USB_SERIAL.borrow(cs).borrow_mut() {
                 let _ = core::write!(usb, $($arg)*);
+                asm::delay(1_000);
+
                 usb.poll();
 
-                // small delay to avoid race conditions
                 asm::delay(1_000);
             }
         });
