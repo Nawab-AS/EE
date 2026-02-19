@@ -1,14 +1,17 @@
 #![no_std]
 #![no_main]
+
+// heap setup
 extern crate alloc;
+use core::usize;
+
 use alloc::format;
 use linked_list_allocator::LockedHeap;
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-// Heap size (adjust as needed)
-const HEAP_SIZE: usize = 16 * 1024;
+const HEAP_SIZE: usize = 16 * 1024; // kb
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 fn init_heap() {
@@ -18,59 +21,41 @@ fn init_heap() {
     }
 }
 
-mod logger;
 
 use panic_halt as _;
 use rp235x_hal as hal;
 use cortex_m_rt;
+use cortex_m::{peripheral::Peripherals, asm};
+
+mod logger;
+mod lookup;
+mod helper;
+mod ecc;
+mod rsa;
 
 // consts
 static mut USB_BUS: Option<usb_device::bus::UsbBusAllocator<hal::usb::UsbBus>> = None;
 const XTAL_FREQ_HZ: u32 = 12_000_000;
+const TRIALS_PER_KEY: usize = 100;
 
 #[unsafe(link_section = ".start_block")]
 #[used]
 pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
-
-// Calculate the nth fibonacci number
-fn fibonacci(n: u8) -> u64 {
-    if n <= 1 {
-        return n as u64;
-    }
-    
-    let mut a: u64 = 0;
-    let mut b: u64 = 1;
-    
-    for n1 in 2..=n {
-        let temp = a.saturating_add(b);
-        a = b;
-        b = temp;
-        let line = format!("n = {}, a = {}, b = {}\r\n", n1, a, b);
-        uprint!("{}", line);
-    }
-    
-    b
-}
-
-// Parse input string to a number, trimming whitespace
-fn parse_input(buf: &[u8]) -> Result<u8, &'static str> {
-    let s = core::str::from_utf8(buf).map_err(|_| "Invalid UTF-8")?;
-    let trimmed = s.trim();
-    
-    if trimmed == "STOP" {
-        return Err("STOP");
-    }
-    
-    let num: u8 = trimmed.parse().map_err(|_| "Invalid number")?;
-    Ok(num)
-}
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
     // setup
     init_heap();
     let mut pac = hal::pac::Peripherals::take().unwrap(); // peripheral access
+    let mut cp = Peripherals::take().unwrap(); // cortex-m peripherals
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG); // needed for clocks
+
+    // Initialize DWT cycle counter
+    cp.DCB.enable_trace();
+    unsafe {
+        cp.DWT.cyccnt.write(0); // Reset cycle counter
+    }
+    cp.DWT.enable_cycle_counter();
 
     let clocks = hal::clocks::init_clocks_and_plls(
         XTAL_FREQ_HZ,
@@ -101,57 +86,62 @@ fn main() -> ! {
         logger::init_usb_serial(usb_bus_ref);
     }
 
-    // 1. STARTUP - Wait for "START" from serial
-    
+    // Wait for "START" from serial
     let mut buf = [0u8; 16];
     loop {
         logger::poll_usb();
         if let Some(len) = logger::read_line(&mut buf) {
             if let Ok(s) = core::str::from_utf8(&buf[..len]) {
-                if s.trim() == "START" {
+                if s == "START" {
                     break;
                 }
             }
         }
     }
     
-    // Display startup message
-    uprint!("=== Fibonacci Calculator Started ===\r\n");
-    uprint!("Enter a number (0-93) to calculate fibonacci\r\n");
-    uprint!("Enter 'STOP' to exit\r\n");
+    uprint!("=== Started EE Experiment ===\n");
     
-    // 2. MAIN LOOP
-    let mut input_buf = [0u8; 32];
-    loop {
-        logger::poll_usb();
-        
-        // Ask for input
-        uprint!("Generate the nth fibonacci number: n = ");
-        
-        // Wait for input
-        loop {
-            logger::poll_usb();
-            if let Some(len) = logger::read_line(&mut input_buf) {
-                // Parse the input
-                match parse_input(&input_buf[..len]) {
-                    Ok(n) => {
-                        // Calculate and display fibonacci number
-                        let fib_n = fibonacci(n);
-                        let line = format!("fibonacci({}) = {}\r\n", n, fib_n);
-                        uprint!("{}", line);
-                        break; // Break inner loop, continue main loop
-                    }
-                    Err("STOP") => {
-                        // 3. EXIT
-                        uprint!("Stopping\r\n");
-                        loop {} // Infinite loop to "exit"
-                    }
-                    Err(e) => {
-                        uprint!("Error: {}. Please enter a valid number (0-93) or 'STOP'\r\n", e);
-                        uprint!("Generate the nth fibonacci number: n = ");
-                    }
-                }
+
+    // MAIN PROGRAM
+    const TOTAL_SIZES: u16 = ((lookup::PRIME_RANGE[1] - lookup::PRIME_RANGE[0]) / 8 + 1) as u16;
+    let mut results = [(0u32, 0u32); lookup::TRIALS as usize];
+    for bits in 0..TOTAL_SIZES {
+        for i in 0..(lookup::TRIALS as u16) {
+            uprint!("Processing lookup table for {} bits, trial #{}\n", bits, i+1);
+            let mut ecc_time: u64 = 0;
+            let mut rsa_time: u64 = 0;
+            
+            let trial_data: lookup::KeySize = lookup::LOOKUP_TABLE[(bits * (lookup::TRIALS as u16) + i) as usize];
+            for _ in 0..TRIALS_PER_KEY {
+                // ECC
+                let mut start = cp.DWT.cyccnt.read();
+                ecc::ECDH(trial_data.ecc);
+                let mut end = cp.DWT.cyccnt.read();
+                ecc_time += end.wrapping_sub(start) as u64;
+
+                asm::delay(10000); // Cooldown
+
+                // RSA
+                start = cp.DWT.cyccnt.read();
+                rsa::KEY_TRANSPORT(trial_data.rsa);
+                end = cp.DWT.cyccnt.read();
+                rsa_time += end.wrapping_sub(start) as u64;
             }
+            results[i as usize] = ((ecc_time / (TRIALS_PER_KEY as u64)) as u32, (rsa_time / (TRIALS_PER_KEY as u64)) as u32);
         }
+        
+        // Send results for this key size
+        let mut result_str = format!("=== Results for {} bits ===\n", bits);
+        
+        for i in 0..(results.len()) {
+            result_str += &format!("Trial #{}: ECC = {}, RSA = {}\n", i % (lookup::TRIALS as usize) + 1, results[i].0, results[i].1);
+        }
+
+        uprint!("{}\n\n", result_str);
+
+        results = [(0u32, 0u32); lookup::TRIALS as usize]; // reset for next key size
     }
+
+    uprint!("=== Experiment Complete ===\n");
+    helper::exit()
 }

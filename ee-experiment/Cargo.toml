@@ -1,5 +1,5 @@
 [package]
-name = "fibonacci"
+name = "EE_experiment"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -8,12 +8,22 @@ license = "MIT"
 regex = "1.11.0"
 
 [dependencies]
+# Hardware
+rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"] }
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 embedded-hal = "1.0.0"
 panic-halt = "1.0"
-rp235x-hal = { version = "0.3", features = ["rt", "critical-section-impl"] }
+
+# serial comunication
 usb-device = "0.3"
 usbd-serial = "0.2"
 linked_list_allocator = "0.10"
 
+# U512
+primitive-types = { version = "0.12", default-features = false }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"

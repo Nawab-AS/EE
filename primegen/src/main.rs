@@ -4,8 +4,7 @@ use std::io::{BufWriter, Write};
 
 mod small_primes;
 mod is_prime;
-use crate::is_prime::is_prime;
-use crate::is_prime::SMALL_PRIMES;
+use crate::is_prime::{is_prime, SMALL_PRIMES};
 
 const PRIME_RANGE: [u16; 2] = [8, 256];
 const TRIALS: u8 = 5; // ECC/RSA trials per key size
@@ -18,9 +17,7 @@ struct RSA { // given primes p and q
     pub modulus: U512, // p * q
     pub totient: U512, // (p-1)(q-1)
     pub exponent: U256, // random number coprime to totient
-    pub private_key: U512, // modular inverse of exponent and totient
 }
-
 
 #[derive(Clone)]
 struct Point { 
@@ -30,9 +27,9 @@ struct Point {
 
 // Weierstrass Curve (y^2 = x^3 + ax + b mod p) where p is prime and 27a^3 + 27b^2 != 0 mod p
 #[derive(Clone)]
+#[allow(dead_code)]
 struct EccCurve {
     pub a: U256, 
-    #[allow(dead_code)]
     pub b: U256,
     pub p: U256,
     pub generator: Point,
@@ -43,9 +40,7 @@ struct ECC {
     pub curve: EccCurve,
     
     pub private_key1: U256, // random number in [1, p-1]
-    pub public_key1: Point, // private_key * base_point
     pub private_key2: U256, // random number in [1, p-1]
-    pub public_key2: Point, // private_key * base_point
 }
 
 #[derive(Clone)]
@@ -134,77 +129,6 @@ fn mod_inverse(a: U512, m: U512) -> Option<U512> {
     if x_neg { Some(m - (x % m)) } else { Some(x % m) }
 }
 
-fn mul_mod_u256(a: U256, b: U256, m: U256) -> U256 {
-    if m == U256::one() { return U256::zero(); }
-    let a = a % m; let b = b % m;
-    if a.is_zero() || b.is_zero() { return U256::zero(); }
-    if let Some(product) = a.checked_mul(b) { return product % m; }
-    
-    let mut result = U256::zero();
-    let mut multiplicand = a;
-    let mut multiplier = b;
-    
-    while !multiplier.is_zero() {
-        if multiplier.0[0] & 1 == 1 {
-            result = if let Some(sum) = result.checked_add(multiplicand) {
-                sum % m
-            } else {
-                let r = result % m; let mc = multiplicand % m;
-                (r + mc) % m
-            };
-        }
-        multiplier = multiplier >> 1;
-        if !multiplier.is_zero() {
-            multiplicand = if let Some(doubled) = multiplicand.checked_add(multiplicand) {
-                doubled % m
-            } else {
-                let mc = multiplicand % m;
-                (mc + mc) % m
-            };
-        }
-    }
-    
-    result
-}
-
-fn extended_gcd_u256(a: U256, b: U256) -> (U256, U256, U256, bool, bool) {
-    if b.is_zero() { return (a, U256::one(), U256::zero(), false, false); }
-    
-    let mut old_r = a; let mut r = b;
-    let mut old_s = U256::one(); let mut s = U256::zero();
-    let mut old_t = U256::zero(); let mut t = U256::one();
-    let mut old_s_neg = false; let mut s_neg = false;
-    let mut old_t_neg = false; let mut t_neg = true;
-    
-    while !r.is_zero() {
-        let quotient = old_r / r;
-        let temp_r = r; r = old_r - quotient * r; old_r = temp_r;
-        
-        let temp_s = s; let temp_s_neg = s_neg;
-        let prod = quotient * s;
-        if old_s_neg == s_neg {
-            if old_s >= prod { s = old_s - prod; s_neg = old_s_neg; }
-            else { s = prod - old_s; s_neg = !old_s_neg; }
-        } else { s = old_s + prod; s_neg = old_s_neg; }
-        old_s = temp_s; old_s_neg = temp_s_neg;
-        
-        let temp_t = t; let temp_t_neg = t_neg;
-        let prod = quotient * t;
-        if old_t_neg == t_neg {
-            if old_t >= prod { t = old_t - prod; t_neg = old_t_neg; }
-            else { t = prod - old_t; t_neg = !old_t_neg; }
-        } else { t = old_t + prod; t_neg = old_t_neg; }
-        old_t = temp_t; old_t_neg = temp_t_neg;
-    }
-    (old_r, old_s, old_t, old_s_neg, old_t_neg)
-}
-
-fn mod_inverse_u256(a: U256, m: U256) -> Option<U256> {
-    let (gcd, x, _, x_neg, _) = extended_gcd_u256(a, m);
-    if gcd != U256::one() { return None; }
-    if x_neg { Some(m - (x % m)) } else { Some(x % m) }
-}
-
 fn u512_to_u256(val: U512) -> U256 {
     U256([val.0[0], val.0[1], val.0[2], val.0[3]])
 }
@@ -231,84 +155,6 @@ fn simple_rand(seed: &mut U512, max: U512) -> U512 {
     *seed
 }
 
-fn ecc_point_add(p1: &Point, p2: &Point, curve: &EccCurve) -> Point {
-    // Handle point at infinity (represented as (0, 0))
-    if p1.x.is_zero() && p1.y.is_zero() {
-        return p2.clone();
-    }
-    if p2.x.is_zero() && p2.y.is_zero() {
-        return p1.clone();
-    }
-    
-    // If same x coordinate but different y, return infinity
-    if p1.x == p2.x {
-        if p1.y != p2.y { 
-            return Point { x: U256::zero(), y: U256::zero() }; 
-        }
-        let numerator = mul_mod_u256(U256::from(3), mul_mod_u256(p1.x, p1.x, curve.p), curve.p);
-        let numerator = (numerator + curve.a) % curve.p;
-        let denominator = mul_mod_u256(U256::from(2), p1.y, curve.p);
-        
-        if let Some(denom_inv) = mod_inverse_u256(denominator, curve.p) {
-            let slope = mul_mod_u256(numerator, denom_inv, curve.p);
-            let x3 = {
-                let slope_sq = mul_mod_u256(slope, slope, curve.p);
-                let two_x1 = mul_mod_u256(U256::from(2), p1.x, curve.p);
-                if slope_sq >= two_x1 { (slope_sq - two_x1) % curve.p }
-                else { curve.p - ((two_x1 - slope_sq) % curve.p) }
-            };
-            let y3 = {
-                let x_diff = if p1.x >= x3 { p1.x - x3 }
-                else { curve.p - ((x3 - p1.x) % curve.p) };
-                let slope_mul = mul_mod_u256(slope, x_diff, curve.p);
-                if slope_mul >= p1.y { (slope_mul - p1.y) % curve.p }
-                else { curve.p - ((p1.y - slope_mul) % curve.p) }
-            };
-            Point { x: x3, y: y3 }
-        } else { Point { x: U256::zero(), y: U256::zero() } }
-    } else {
-        let numerator = if p2.y >= p1.y { (p2.y - p1.y) % curve.p }
-        else { curve.p - ((p1.y - p2.y) % curve.p) };
-        let denominator = if p2.x >= p1.x { (p2.x - p1.x) % curve.p }
-        else { curve.p - ((p1.x - p2.x) % curve.p) };
-        
-        if let Some(denom_inv) = mod_inverse_u256(denominator, curve.p) {
-            let slope = mul_mod_u256(numerator, denom_inv, curve.p);
-            let x3 = {
-                let slope_sq = mul_mod_u256(slope, slope, curve.p);
-                let sum = (p1.x + p2.x) % curve.p;
-                if slope_sq >= sum { (slope_sq - sum) % curve.p }
-                else { curve.p - ((sum - slope_sq) % curve.p) }
-            };
-            let y3 = {
-                let x_diff = if p1.x >= x3 { p1.x - x3 }
-                else { curve.p - ((x3 - p1.x) % curve.p) };
-                let slope_mul = mul_mod_u256(slope, x_diff, curve.p);
-                if slope_mul >= p1.y { (slope_mul - p1.y) % curve.p }
-                else { curve.p - ((p1.y - slope_mul) % curve.p) }
-            };
-            Point { x: x3, y: y3 }
-        } else { Point { x: U256::zero(), y: U256::zero() } }
-    }
-}
-
-fn ecc_scalar_mult(k: U256, point: &Point, curve: &EccCurve) -> Point {
-    if k.is_zero() { return Point { x: U256::zero(), y: U256::zero() }; }
-    
-    let mut result = Point { x: U256::zero(), y: U256::zero() };
-    let mut addend = point.clone();
-    let mut scalar = k;
-    
-    while !scalar.is_zero() {
-        if scalar & U256::one() == U256::one() {
-            result = ecc_point_add(&result, &addend, curve);
-        }
-        addend = ecc_point_add(&addend, &addend, curve);
-        scalar = scalar >> 1;
-    }
-    result
-}
-
 fn generate_rsa(p: U512, q: U512, seed: &mut U512) -> RSA {
     let modulus = if let Some(m) = p.checked_mul(q) { 
         m 
@@ -322,15 +168,12 @@ fn generate_rsa(p: U512, q: U512, seed: &mut U512) -> RSA {
     else { mul_mod(p_minus_1, q_minus_1, U512::MAX) };
     
     let exponent = U256::from(65537);
-    let private_key = mod_inverse(u256_to_u512(exponent), totient).unwrap_or_else(|| {
-        mod_inverse(U512::from(3), totient).unwrap_or(U512::one())
-    });
     
     let max_session = if modulus > U512::from(3) { modulus - U512::from(3) } 
     else { U512::from(100) };
     let session_key = simple_rand(seed, max_session) + U512::from(2);
     
-    RSA { session_key, modulus, totient, exponent, private_key }
+    RSA { session_key, modulus, totient, exponent }
 }
 
 fn generate_ecc(prime: U512, rsa_private_key: U512, seed: &mut U512) -> ECC {
@@ -349,14 +192,12 @@ fn generate_ecc(prime: U512, rsa_private_key: U512, seed: &mut U512) -> ECC {
     let curve = EccCurve { a, b, p: prime_u256, generator: generator.clone() };
     
     let private_key1 = u512_to_u256(rsa_private_key % prime);
-    let public_key1 = ecc_scalar_mult(private_key1, &generator, &curve);
     
     let private_key2 = if prime > U512::one() {
         u512_to_u256(simple_rand(seed, prime - U512::one()) + U512::one())
     } else { U256::from(3) };
-    let public_key2 = ecc_scalar_mult(private_key2, &generator, &curve);
     
-    ECC { curve, private_key1, public_key1, private_key2, public_key2 }
+    ECC { curve, private_key1, private_key2 }
 }
 
 fn next_safe_prime(n: U512, bits: u16, min: U512, max: U512) -> U512 {
@@ -422,13 +263,13 @@ fn fmt_curve(c: &EccCurve) -> String {
 }
 
 fn fmt_rsa(r: &RSA) -> String {
-    format!("RSA {{\n            session_key: {},\n            modulus: {},\n            totient: {},\n            exponent: {},\n            private_key: {}\n        }}", 
-        fmt_u512(r.session_key), fmt_u512(r.modulus), fmt_u512(r.totient), fmt_u256(r.exponent), fmt_u512(r.private_key))
+    format!("RSA {{\n            session_key: {},\n            modulus: {},\n            totient: {},\n            exponent: {}\n        }}", 
+        fmt_u512(r.session_key), fmt_u512(r.modulus), fmt_u512(r.totient), fmt_u256(r.exponent))
 }
 
 fn fmt_ecc(e: &ECC) -> String {
-    format!("ECC {{\n            curve: {},\n            private_key1: {},\n            public_key1: {},\n            private_key2: {},\n            public_key2: {}\n        }}", 
-        fmt_curve(&e.curve), fmt_u256(e.private_key1), fmt_point(&e.public_key1), fmt_u256(e.private_key2), fmt_point(&e.public_key2))
+    format!("ECC {{\n            curve: {},\n            private_key1: {},\n            private_key2: {}\n        }}", 
+        fmt_curve(&e.curve), fmt_u256(e.private_key1), fmt_u256(e.private_key2))
 }
 
 fn main() {
@@ -439,18 +280,20 @@ fn main() {
     writeln!(writer, "use primitive_types::{{U256, U512}};\n").unwrap();
     writeln!(writer, "// Curve parameters: y^2 = x^3 + ax + b (mod p)").unwrap();
     writeln!(writer, "pub const CURVE_A: U256 = U256([2, 0, 0, 0]);").unwrap();
-    writeln!(writer, "pub const CURVE_B: U256 = U256([3, 0, 0, 0]);\n").unwrap();
-    writeln!(writer, "#[derive(Clone)]").unwrap();
+    writeln!(writer, "pub const CURVE_B: U256 = U256([3, 0, 0, 0]);").unwrap();
+    writeln!(writer, "pub const PRIME_RANGE: [u16; 2] = [{}, {}];", PRIME_RANGE[0], PRIME_RANGE[1]).unwrap();
+    writeln!(writer, "pub const TRIALS: u8 = {};\n", TRIALS).unwrap();
+    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
     writeln!(writer, "pub struct RSA {{ pub session_key: U512, pub modulus: U512, pub totient: U512, pub exponent: U256, pub private_key: U512}}\n").unwrap();
-    writeln!(writer, "#[derive(Clone)]").unwrap();
+    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
     writeln!(writer, "pub struct Point {{ pub x: U256, pub y: U256}}\n").unwrap();
-    writeln!(writer, "#[derive(Clone)]").unwrap();
+    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
     writeln!(writer, "pub struct EccCurve {{ pub a: U256, pub b: U256, pub p: U256,  pub generator: Point}}\n").unwrap();
-    writeln!(writer, "#[derive(Clone)]").unwrap();
-    writeln!(writer, "pub struct ECC {{ pub curve: EccCurve, pub private_key1: U256, pub public_key1: Point, pub private_key2: U256, pub public_key2: Point}}\n").unwrap();
-    writeln!(writer, "#[derive(Clone)]").unwrap();
+    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
+    writeln!(writer, "pub struct ECC {{ pub curve: EccCurve, pub private_key1: U256, pub private_key2: U256}}\n").unwrap();
+    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
     writeln!(writer, "pub struct KeySize {{ pub bits: u16, pub rsa: RSA, pub ecc: ECC}}\n").unwrap();
-    
+
     const TOTAL_TRIALS: usize = ((PRIME_RANGE[1] - PRIME_RANGE[0]) / 8 + 1) as usize * TRIALS as usize;
     let mut lookup: [Option<KeySize>; TOTAL_TRIALS] = [const { None }; TOTAL_TRIALS];
     let mut index = 0usize;
@@ -483,7 +326,10 @@ fn main() {
             candidate = p3 + U512::from(4);
             
             let rsa = generate_rsa(p1, p2, &mut seed2);
-            let ecc = generate_ecc(p3, rsa.private_key, &mut seed2);
+            let rsa_private_key = mod_inverse(u256_to_u512(rsa.exponent), rsa.totient).unwrap_or_else(|| {
+                mod_inverse(U512::from(3), rsa.totient).unwrap_or(U512::one())
+            });
+            let ecc = generate_ecc(p3, rsa_private_key, &mut seed2);
             lookup[index] = Some(KeySize { bits, rsa, ecc });
             index += 1;
         }
@@ -491,7 +337,7 @@ fn main() {
     }
         
     // write lookup array to file
-    writeln!(writer, "// Array of all KeySize structs\npub const KEYSIZES: [KeySize; {}] = [", index).unwrap();
+    writeln!(writer, "// Array of all KeySize structs\npub const LOOKUP_TABLE: [KeySize; {}] = [", index).unwrap();
     
     for i in 0..TOTAL_TRIALS {
         if let Some(ref keysize) = lookup[i] {

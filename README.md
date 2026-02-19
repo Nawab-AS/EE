@@ -22,8 +22,8 @@ git clone https://github.com/nawab-as/ee.git
 
 ### Part 2: Generating the prime lookup table
 Run using a stable version of rust rustc (I used `1.91.1`).
-The generated lookup table will be a large file (120kb, although very compressible) and hence is not included in this repo.
-Additionally, this should be run on a fast computer as the generated prime numbers are seeded and will not be manipulated by cpu architecture or OS.
+The generated lookup table will be a relativiely large file (~220kb, although very compressible) and hence is not included in this repo.
+Additionally, this should be run on a seperate computer than the pico as the generated prime numbers are seeded and will not be manipulated by cpu architecture or OS and also due to the fact that the pico doesn't have and built-in filesystem drivers.
 
 1) Navigate to the `/primegen` directory
 ```bash
@@ -31,13 +31,8 @@ cd ~/ee/primegen
 ```
 
 2) Generate the prime lookup table
-This can take some time, be prepared to wait for 15-30 minutes.
 ```bash
 cargo run --release
-```
-Optionally, you can run this as a background process with `nohup`. This can slow down other processes significantly.
-```bash
-nohup cargo run --release &
 ```
 
 3) Copy the generated lookup table to the main experiment
@@ -73,9 +68,8 @@ This step can be done in various ways. I used the vscode `Serial Moniter` extens
 1) Connect the pico via usb
 
 2) Connect to the pico's serial port
-Use a baud rate of 115200.
+Use a baud rate of 115200
 
 3) Start the experiment
 Sent `START` as plain text to the pico via serial. This will notify the pico to continue the execution of the main program past initialization.
 After this, the pico will output data via serial.
-

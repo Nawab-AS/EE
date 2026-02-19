@@ -23,7 +23,7 @@ fn mul_mod(a: U512, b: U512, m: U512) -> U512 {
         return U512::zero();
     }
     
-    // Try direct multiplication first
+    // direct multiplication
     if let Some(product) = a.checked_mul(b) {
         return product % m;
     }

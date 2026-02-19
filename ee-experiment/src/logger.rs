@@ -6,6 +6,10 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 const NAME: &str = "EE Experiment";
 
+// Input buffer for reading serial data
+static mut INPUT_BUFFER: [u8; 256] = [0; 256];
+static mut INPUT_POS: usize = 0;
+
 pub static USB_SERIAL: Mutex<RefCell<Option<UsbSerial>>> = Mutex::new(RefCell::new(None));
 
 pub struct UsbSerial {
@@ -33,7 +37,7 @@ pub fn init_usb_serial(usb_bus: &'static usb_device::bus::UsbBusAllocator<UsbBus
         .strings(&[StringDescriptors::default()
             .manufacturer("Raspberry Pi")
             .product(NAME)
-            .serial_number("00000000")])
+            .serial_number("12345")])
         .unwrap()
         .device_class(usbd_serial::USB_CLASS_CDC)
         .build();
@@ -53,33 +57,48 @@ pub fn poll_usb() {
     });
 }
 
-// Reads a line from USB serial into the provided buffer. Returns Some(len) if a line is read, None otherwise.
+// Reads input from USB serial into the provided buffer. Returns Some(len) if data is available, None otherwise.
 pub fn read_line(buf: &mut [u8]) -> Option<usize> {
     use cortex_m::interrupt;
-    let mut len = 0;
-    let mut found_newline = false;
+    
+    // try to read more data from USB and add to the buffer
     interrupt::free(|cs| {
         if let Some(ref mut usb) = *USB_SERIAL.borrow(cs).borrow_mut() {
             let mut tmp = [0u8; 64];
             if let Ok(count) = usb.serial.read(&mut tmp) {
-                for &b in &tmp[..count] {
-                    if len < buf.len() {
-                        buf[len] = b;
-                        len += 1;
-                        if b == b'\n' || b == b'\r' {
-                            found_newline = true;
-                            break;
+                unsafe {
+                    let input_pos_ptr = core::ptr::addr_of_mut!(INPUT_POS);
+                    let input_buffer_ptr = core::ptr::addr_of_mut!(INPUT_BUFFER);
+                    
+                    for i in 0..count {
+                        if *input_pos_ptr < (*input_buffer_ptr).len() {
+                            (*input_buffer_ptr)[*input_pos_ptr] = tmp[i];
+                            *input_pos_ptr += 1;
                         }
                     }
                 }
             }
         }
     });
-    if len > 0 && found_newline {
-        Some(len)
-    } else {
-        None
+    
+    // Return whatever data is in the buffer
+    unsafe {
+        let input_pos_ptr = core::ptr::addr_of_mut!(INPUT_POS);
+        let input_buffer_ptr = core::ptr::addr_of_mut!(INPUT_BUFFER);
+        
+        if *input_pos_ptr > 0 {
+            let data_len = (*input_pos_ptr).min(buf.len());
+            // Copy data to output buffer
+            core::ptr::copy((*input_buffer_ptr).as_ptr(), buf.as_mut_ptr(), data_len);
+            
+            // Clear the input buffer
+            *input_pos_ptr = 0;
+            
+            return Some(data_len);
+        }
     }
+    
+    None
 }
 
 #[macro_export]
@@ -90,10 +109,9 @@ macro_rules! uprint {
             if let Some(ref mut usb) = *$crate::logger::USB_SERIAL.borrow(cs).borrow_mut() {
                 let _ = core::write!(usb, $($arg)*);
                 usb.poll();
-                // small delay to avoid race condition
-                for _ in 0..10_000 {
-                    cortex_m::asm::nop();
-                }
+
+                // small delay to avoid race conditions
+                asm::delay(10000);
             }
         });
     }};
