@@ -3,10 +3,10 @@ import re
 def parse(log_file: str):
     import csv
     with open(log_file, "r") as file:
-        lines = "".join(file.readlines()[2:-2])
+        lines = "".join(file.readlines()[2:])
 
     blocks = {}
-    for match in re.finditer(r"=== Results for (\d{1,3}) bits ===\n(.*?)\n\n", lines, re.DOTALL):
+    for match in re.finditer(r"=== ECC (\d+) / RSA \d+ bits ===\n(.*?)(?:\n\n|\Z)", lines, re.DOTALL):
         trials = []
         bit_size = int(match.group(1))
         block_content = match.group(2).strip()
