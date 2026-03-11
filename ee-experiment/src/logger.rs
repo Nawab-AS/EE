@@ -6,7 +6,6 @@ use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 const NAME: &str = "EE Experiment";
 
-// Input buffer for reading serial data
 static mut INPUT_BUFFER: [u8; 256] = [0; 256];
 static mut INPUT_POS: usize = 0;
 
@@ -57,7 +56,7 @@ pub fn poll_usb() {
     });
 }
 
-// Reads input from USB serial into the provided buffer. Returns Some(len) if data is available, None otherwise.
+// read available data from USB serial into buffer, returns byte count if any
 pub fn read_line(buf: &mut [u8]) -> Option<usize> {
     use cortex_m::interrupt;
     
@@ -69,7 +68,7 @@ pub fn read_line(buf: &mut [u8]) -> Option<usize> {
                 unsafe {
                     let input_pos_ptr = core::ptr::addr_of_mut!(INPUT_POS);
                     let input_buffer_ptr = core::ptr::addr_of_mut!(INPUT_BUFFER);
-                    
+
                     for i in 0..count {
                         if *input_pos_ptr < (*input_buffer_ptr).len() {
                             (*input_buffer_ptr)[*input_pos_ptr] = tmp[i];
@@ -85,15 +84,11 @@ pub fn read_line(buf: &mut [u8]) -> Option<usize> {
     unsafe {
         let input_pos_ptr = core::ptr::addr_of_mut!(INPUT_POS);
         let input_buffer_ptr = core::ptr::addr_of_mut!(INPUT_BUFFER);
-        
+
         if *input_pos_ptr > 0 {
             let data_len = (*input_pos_ptr).min(buf.len());
-            // Copy data to output buffer
             core::ptr::copy((*input_buffer_ptr).as_ptr(), buf.as_mut_ptr(), data_len);
-            
-            // Clear the input buffer
             *input_pos_ptr = 0;
-            
             return Some(data_len);
         }
     }

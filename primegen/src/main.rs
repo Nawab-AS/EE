@@ -1,359 +1,317 @@
-use primitive_types::{U256, U512};
+use num_bigint::BigUint;
+use num_integer::Integer;
+use num_traits::{One, Zero};
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
+mod conversions;
 mod small_primes;
 mod is_prime;
-use crate::is_prime::{is_prime, SMALL_PRIMES};
 
-const PRIME_RANGE: [u16; 2] = [8, 256];
-const TRIALS: u8 = 5; // ECC/RSA trials per key size
+use crate::conversions::ECC_V_RSA;
+use crate::is_prime::{is_prime, SMALL_PRIMES_BIG};
+
+const TRIALS: u8 = 20;
 const SEED: u32 = 873267326;
+const PRIME_SEARCH_LIMIT: u32 = 5_000_000;
+const LCG_A: u64 = 6364136223846793005;
+const LCG_C: u64 = 1442695040888963407;
+const RSA_PUBLIC_EXPONENT: u32 = 65537;
+const HEX_CHARS_U256: usize = 64;
+const HEX_CHARS_U1024: usize = 256;
+const HEX_CHARS_U2048: usize = 512;
 
-#[derive(Clone)]
-struct RSA { // given primes p and q
-    pub session_key: U512, // random number in [2, modulus-1]
-    
-    pub modulus: U512, // p * q
-    pub totient: U512, // (p-1)(q-1)
-    pub exponent: U256, // random number coprime to totient
-}
-
-#[derive(Clone)]
-struct Point { 
-    pub x: U256, 
-    pub y: U256 
-}
-
-// Weierstrass Curve (y^2 = x^3 + ax + b mod p) where p is prime and 27a^3 + 27b^2 != 0 mod p
-#[derive(Clone)]
-#[allow(dead_code)]
-struct EccCurve {
-    pub a: U256, 
-    pub b: U256,
-    pub p: U256,
-    pub generator: Point,
-}
-
-#[derive(Clone)]
-struct ECC {
-    pub curve: EccCurve,
-    
-    pub private_key1: U256, // random number in [1, p-1]
-    pub private_key2: U256, // random number in [1, p-1]
-}
-
-#[derive(Clone)]
-struct KeySize {
-    pub bits: u16,
-    pub rsa: RSA,
-    pub ecc: ECC,
-}
-
-fn mul_mod(a: U512, b: U512, m: U512) -> U512 {
-    if m == U512::one() { return U512::zero(); }
-    let a = a % m;
-    let b = b % m;
-    if a.is_zero() || b.is_zero() { 
-        return U512::zero(); 
+// simple LCG-based PRNG, deterministic (no OS randomness)
+fn simple_rand(seed: &mut BigUint, max: &BigUint) -> BigUint {
+    if max.is_zero() || *max == BigUint::one() {
+        return BigUint::zero();
     }
-    if let Some(product) = a.checked_mul(b) { return product % m; }
-    
-    // Russian peasant multiplication
-    let mut result = U512::zero();
-    let mut multiplicand = a;
-    let mut multiplier = b;
-    
-    while !multiplier.is_zero() {
-        if multiplier.0[0] & 1 == 1 {
-            result = if let Some(sum) = result.checked_add(multiplicand) {
-                sum % m
-            } else {
-                let r = result % m;
-                let mc = multiplicand % m;
-                (r + mc) % m
-            };
+    let a = BigUint::from(LCG_A);
+    let c = BigUint::from(LCG_C);
+    *seed = (seed.clone() * &a + &c) % max;
+    seed.clone()
+}
+
+fn bit_bounds(bits: u16) -> (BigUint, BigUint) {
+    let min = BigUint::one() << (bits as usize - 1);
+    let max = (BigUint::one() << bits as usize) - BigUint::one();
+    (min, max)
+}
+
+fn is_composite_by_small_primes(value: &BigUint) -> bool {
+    SMALL_PRIMES_BIG
+        .iter()
+        .any(|p| (value % p).is_zero() && value != p)
+}
+
+// find the next prime >= start that fits in the given bit width
+fn next_prime(start: &BigUint, bits: u16) -> BigUint {
+    let (min_val, max_val) = bit_bounds(bits);
+    let two = BigUint::from(2u32);
+
+    let mut candidate = start.clone() | BigUint::one();
+    if candidate < min_val {
+        candidate = &min_val | BigUint::one();
+    }
+
+    for _ in 0..PRIME_SEARCH_LIMIT {
+        if candidate > max_val {
+            candidate = &min_val | BigUint::one();
         }
-        multiplier = multiplier >> 1;
-        if !multiplier.is_zero() {
-            multiplicand = if let Some(doubled) = multiplicand.checked_add(multiplicand) {
-                doubled % m
-            } else {
-                let mc = multiplicand % m;
-                (mc + mc) % m
-            };
+
+        if !is_composite_by_small_primes(&candidate) && is_prime(&candidate) {
+            return candidate;
         }
+
+        candidate += &two;
     }
-    result
+
+    panic!("Could not find prime for {} bits", bits);
 }
 
-// Extended Euclidian GCD for modular inverse
-fn extended_gcd(a: U512, b: U512) -> (U512, U512, U512, bool, bool) {
-    if b.is_zero() { return (a, U512::one(), U512::zero(), false, false); }
-    
-    let mut old_r = a; 
-    let mut r = b;
-    let mut old_s = U512::one(); 
-    let mut s = U512::zero();
-    let mut old_t = U512::zero(); 
-    let mut t = U512::one();
-    let mut old_s_neg = false; let mut s_neg = false;
-    let mut old_t_neg = false; let mut t_neg = true;
-    
-    while !r.is_zero() {
-        let quotient = old_r / r;
-        let temp_r = r; r = old_r - quotient * r; old_r = temp_r;
-        
-        let temp_s = s; let temp_s_neg = s_neg;
-        let prod = quotient * s;
-        if old_s_neg == s_neg {
-            if old_s >= prod { s = old_s - prod; s_neg = old_s_neg; }
-            else { s = prod - old_s; s_neg = !old_s_neg; }
-        } else { s = old_s + prod; s_neg = old_s_neg; }
-        old_s = temp_s; old_s_neg = temp_s_neg;
-        
-        let temp_t = t; let temp_t_neg = t_neg;
-        let prod = quotient * t;
-        if old_t_neg == t_neg {
-            if old_t >= prod { t = old_t - prod; t_neg = old_t_neg; }
-            else { t = prod - old_t; t_neg = !old_t_neg; }
-        } else { t = old_t + prod; t_neg = old_t_neg; }
-        old_t = temp_t; old_t_neg = temp_t_neg;
+// find the next safe prime p = 2q+1 (both p and q prime)
+fn next_safe_prime(start: &BigUint, bits: u16) -> BigUint {
+    let (min_val, max_val) = bit_bounds(bits);
+    let q_min = &min_val >> 1usize;
+    let q_max = &max_val >> 1usize;
+    let two = BigUint::from(2u32);
+
+    let mut q = (start >> 1usize) | BigUint::one();
+    if q < q_min {
+        q = &q_min | BigUint::one();
     }
-    (old_r, old_s, old_t, old_s_neg, old_t_neg)
-}
 
-fn mod_inverse(a: U512, m: U512) -> Option<U512> {
-    let (gcd, x, _, x_neg, _) = extended_gcd(a, m);
-    if gcd != U512::one() { return None; }
-    if x_neg { Some(m - (x % m)) } else { Some(x % m) }
-}
-
-fn u512_to_u256(val: U512) -> U256 {
-    U256([val.0[0], val.0[1], val.0[2], val.0[3]])
-}
-
-fn u256_to_u512(val: U256) -> U512 {
-    U512([val.0[0], val.0[1], val.0[2], val.0[3], 0, 0, 0, 0])
-}
-
-// Deterministic pseudo-random generator using LCG (seeded, no OS randomness)
-fn simple_rand(seed: &mut U512, max: U512) -> U512 {
-    // LCG: X_{n+1} = (a * X_n + c) mod m
-    let a = U512::from(6364136223846793005u64);
-    let c = U512::from(1442695040888963407u64);
-    
-    if let Some(product) = seed.checked_mul(a) {
-        *seed = product % max;
-    } else {
-        *seed = mul_mod(*seed, a, max);
-    }
-    
-    *seed = if let Some(sum) = seed.checked_add(c) {
-        sum % max
-    } else { (*seed + (c % max)) % max };
-    *seed
-}
-
-fn generate_rsa(p: U512, q: U512, seed: &mut U512) -> RSA {
-    let modulus = if let Some(m) = p.checked_mul(q) { 
-        m 
-    } else { 
-        mul_mod(p, q, U512::MAX) 
-    };
-    
-    let p_minus_1 = p - U512::one();
-    let q_minus_1 = q - U512::one();
-    let totient = if let Some(t) = p_minus_1.checked_mul(q_minus_1) { t }
-    else { mul_mod(p_minus_1, q_minus_1, U512::MAX) };
-    
-    let exponent = U256::from(65537);
-    
-    let max_session = if modulus > U512::from(3) { modulus - U512::from(3) } 
-    else { U512::from(100) };
-    let session_key = simple_rand(seed, max_session) + U512::from(2);
-    
-    RSA { session_key, modulus, totient, exponent }
-}
-
-fn generate_ecc(prime: U512, rsa_private_key: U512, seed: &mut U512) -> ECC {
-    let prime_u256 = u512_to_u256(prime);
-    let a = U256::from(2); let b = U256::from(3);
-    
-    let gen_x = if prime > U512::one() {
-        u512_to_u256(simple_rand(seed, prime - U512::one()) + U512::one())
-    } else { U256::from(2) };
-    
-    let gen_y = if prime > U512::one() {
-        u512_to_u256(simple_rand(seed, prime - U512::one()) + U512::one())
-    } else { U256::from(2) };
-    
-    let generator = Point { x: gen_x, y: gen_y };
-    let curve = EccCurve { a, b, p: prime_u256, generator: generator.clone() };
-    
-    let private_key1 = u512_to_u256(rsa_private_key % prime);
-    
-    let private_key2 = if prime > U512::one() {
-        u512_to_u256(simple_rand(seed, prime - U512::one()) + U512::one())
-    } else { U256::from(3) };
-    
-    ECC { curve, private_key1, private_key2 }
-}
-
-fn next_safe_prime(n: U512, bits: u16, min: U512, max: U512) -> U512 {
-    const MAX_ITER: u32 = if cfg!(debug_assertions) { 500_000 } else { 5_000_000 };
-    
-    let q_min = min >> 1;
-    let q_max = max >> 1;
-    let mut q = (n >> 1) | U512::one();
-    if q < q_min { q = q_min | U512::one(); }
-    
-    let mut iter = 0u32;
-    loop {
-        if q > q_max { q = q_min | U512::one(); }
-        
-        let mut q_divisible = false;
-        for &small_p in &SMALL_PRIMES {
-            if q % small_p == U512::zero() && q != small_p {
-                q_divisible = true;
-                break;
-            }
+    for _ in 0..PRIME_SEARCH_LIMIT {
+        if q > q_max {
+            q = &q_min | BigUint::one();
         }
-        
-        if !q_divisible {
-            let p = (q << 1) + U512::one(); // p = 2q + 1
-            
-            let mut p_divisible = false;
-            for &small_p in &SMALL_PRIMES {
-                if p % small_p == U512::zero() && p != small_p {
-                    p_divisible = true; break;
-                }
-            }
-            
-            if !p_divisible && p >= min && p <= max {
-                if is_prime(q, bits - 1) {
-                    if is_prime(p, bits) { return p; }
+
+        if !is_composite_by_small_primes(&q) {
+            let p_candidate = (&q << 1usize) + BigUint::one();
+
+            if !is_composite_by_small_primes(&p_candidate)
+                && p_candidate >= min_val
+                && p_candidate <= max_val
+            {
+                if is_prime(&q) && is_prime(&p_candidate) {
+                    return p_candidate;
                 }
             }
         }
-        
-        q = q + U512::from(2);
-        iter += 1;
-        if iter >= MAX_ITER {
-            eprintln!("[ERROR] Timeout: Could not find a safe prime for {} bits after {} iterations, exiting...", bits, MAX_ITER);
-            std::process::exit(1);
-        }
+        q += &two;
     }
+    panic!("Could not find safe prime for {} bits", bits);
 }
 
-fn fmt_u512(v: U512) -> String {
-    format!("U512([{}, {}, {}, {}, {}, {}, {}, {}])", v.0[0], v.0[1], v.0[2], v.0[3], v.0[4], v.0[5], v.0[6], v.0[7])
+struct TrialResult {
+    ecc_bits: u16,
+    rsa_bits: u16,
+    session_key: BigUint,
+    exponent: BigUint,
+    p: BigUint,
+    q: BigUint,
+    ecc_prime: BigUint,
+    gen_x: BigUint,
+    gen_y: BigUint,
+    ecc_private_key1: BigUint,
+    ecc_private_key2: BigUint,
 }
 
-fn fmt_u256(v: U256) -> String {
-    format!("U256([{}, {}, {}, {}])", v.0[0], v.0[1], v.0[2], v.0[3])
+fn generate_trials(ecc_bits: u16, rsa_bits: u16) -> Vec<TrialResult> {
+    let rsa_prime_bits = rsa_bits / 2;
+    let seed_base = BigUint::from(SEED);
+    let mut seed2 = &seed_base + BigUint::from(ecc_bits as u64);
+
+    // Deterministic starting candidate for RSA primes
+    let (rsa_min, rsa_max) = bit_bounds(rsa_prime_bits);
+    let rsa_range = &rsa_max - &rsa_min + BigUint::one();
+    let seed_mult = &seed_base * BigUint::from(rsa_bits as u64) * BigUint::from(LCG_A);
+    let seed_add = &seed_mult + BigUint::from(LCG_C);
+    let mut rsa_candidate = &rsa_min + (&seed_add % &rsa_range);
+    rsa_candidate = &rsa_candidate | &rsa_min;
+
+    // Deterministic starting candidate for ECC primes
+    let (ecc_min, ecc_max) = bit_bounds(ecc_bits);
+    let ecc_range = &ecc_max - &ecc_min + BigUint::one();
+    let seed_mult_ecc = &seed_base * BigUint::from(ecc_bits as u64) * BigUint::from(LCG_A);
+    let seed_add_ecc = &seed_mult_ecc + BigUint::from(LCG_C);
+    let mut ecc_candidate = &ecc_min + (&seed_add_ecc % &ecc_range);
+    ecc_candidate = &ecc_candidate | &ecc_min;
+
+    let mut results = Vec::with_capacity(TRIALS as usize);
+
+    for _ in 0..TRIALS {
+        // RSA: two regular primes of rsa_prime_bits each
+        let p1 = next_prime(&rsa_candidate, rsa_prime_bits);
+        rsa_candidate = &p1 + BigUint::from(4u32);
+        let p2 = next_prime(&rsa_candidate, rsa_prime_bits);
+        rsa_candidate = &p2 + BigUint::from(4u32);
+
+        // ECC: one safe prime of ecc_bits
+        let p3 = next_safe_prime(&ecc_candidate, ecc_bits);
+        ecc_candidate = &p3 + BigUint::from(4u32);
+
+        // RSA: make sure e is coprime to totient
+        let modulus = &p1 * &p2;
+        let totient = (&p1 - BigUint::one()) * (&p2 - BigUint::one());
+        let exponent = BigUint::from(RSA_PUBLIC_EXPONENT);
+        assert!(
+            totient.gcd(&exponent) == BigUint::one(),
+            "e={} not coprime to totient for {}-bit RSA primes",
+            RSA_PUBLIC_EXPONENT,
+            rsa_prime_bits
+        );
+
+        let max_session = if modulus > BigUint::from(3u32) {
+            &modulus - BigUint::from(3u32)
+        } else {
+            BigUint::from(100u32)
+        };
+        let session_key = simple_rand(&mut seed2, &max_session) + BigUint::from(2u32);
+
+        // ECC parameters
+        let p3_minus_1 = &p3 - BigUint::one();
+        let gen_x = if p3 > BigUint::one() {
+            simple_rand(&mut seed2, &p3_minus_1) + BigUint::one()
+        } else {
+            BigUint::from(2u32)
+        };
+        let gen_y = if p3 > BigUint::one() {
+            simple_rand(&mut seed2, &p3_minus_1) + BigUint::one()
+        } else {
+            BigUint::from(2u32)
+        };
+        let ecc_private_key1 = if p3 > BigUint::one() {
+            simple_rand(&mut seed2, &p3_minus_1) + BigUint::one()
+        } else {
+            BigUint::from(2u32)
+        };
+        let ecc_private_key2 = if p3 > BigUint::one() {
+            simple_rand(&mut seed2, &p3_minus_1) + BigUint::one()
+        } else {
+            BigUint::from(3u32)
+        };
+
+        results.push(TrialResult {
+            ecc_bits,
+            rsa_bits,
+            session_key,
+            exponent,
+            p: p1,
+            q: p2,
+            ecc_prime: p3,
+            gen_x,
+            gen_y,
+            ecc_private_key1,
+            ecc_private_key2,
+        });
+    }
+    results
 }
 
-fn fmt_point(p: &Point) -> String {
-    format!("Point {{ x: {}, y: {} }}", fmt_u256(p.x), fmt_u256(p.y))
+fn biguint_to_be_hex(v: &BigUint, num_hex_chars: usize) -> String {
+    let hex = format!("{:x}", v);
+    assert!(
+        hex.len() <= num_hex_chars,
+        "Value too large for {}-char hex ({} chars needed): {:x}",
+        num_hex_chars,
+        hex.len(),
+        v
+    );
+    format!("{:0>width$}", hex, width = num_hex_chars)
 }
 
-fn fmt_curve(c: &EccCurve) -> String {
-    format!("EccCurve {{\n                a: CURVE_A, b: CURVE_B,\n                p: {},\n                generator: {}\n            }}", fmt_u256(c.p), fmt_point(&c.generator))
+fn fmt_u256(v: &BigUint) -> String {
+    format!("U256::from_be_hex(\"{}\")", biguint_to_be_hex(v, HEX_CHARS_U256))
 }
 
-fn fmt_rsa(r: &RSA) -> String {
-    format!("RSA {{\n            session_key: {},\n            modulus: {},\n            totient: {},\n            exponent: {}\n        }}", 
-        fmt_u512(r.session_key), fmt_u512(r.modulus), fmt_u512(r.totient), fmt_u256(r.exponent))
+fn fmt_u1024(v: &BigUint) -> String {
+    format!("U1024::from_be_hex(\"{}\")", biguint_to_be_hex(v, HEX_CHARS_U1024))
 }
 
-fn fmt_ecc(e: &ECC) -> String {
-    format!("ECC {{\n            curve: {},\n            private_key1: {},\n            private_key2: {}\n        }}", 
-        fmt_curve(&e.curve), fmt_u256(e.private_key1), fmt_u256(e.private_key2))
+fn fmt_u2048(v: &BigUint) -> String {
+    format!("U2048::from_be_hex(\"{}\")", biguint_to_be_hex(v, HEX_CHARS_U2048))
 }
 
 fn main() {
+    let _ = &*SMALL_PRIMES_BIG; // force init
+
+    let all_results: Vec<Vec<TrialResult>> = ECC_V_RSA
+        .par_iter()
+        .map(|&(ecc_bits, rsa_bits)| {
+            let results = generate_trials(ecc_bits, rsa_bits);
+            eprintln!(
+                "ECC {} bits / RSA {} bits - {} trials generated",
+                ecc_bits, rsa_bits, results.len()
+            );
+            results
+        })
+        .collect();
+
+    let entries: Vec<_> = all_results.iter().flat_map(|v| v.iter()).collect();
+
     let file = File::create("./lookup.rs").expect("Failed to create lookup.rs");
-    let mut writer = BufWriter::new(file);
-    
-    writeln!(writer, "// This file is auto-generated. Do not edit manually.").unwrap();
-    writeln!(writer, "use primitive_types::{{U256, U512}};\n").unwrap();
-    writeln!(writer, "// Curve parameters: y^2 = x^3 + ax + b (mod p)").unwrap();
-    writeln!(writer, "pub const CURVE_A: U256 = U256([2, 0, 0, 0]);").unwrap();
-    writeln!(writer, "pub const CURVE_B: U256 = U256([3, 0, 0, 0]);").unwrap();
-    writeln!(writer, "pub const PRIME_RANGE: [u16; 2] = [{}, {}];", PRIME_RANGE[0], PRIME_RANGE[1]).unwrap();
-    writeln!(writer, "pub const TRIALS: u8 = {};\n", TRIALS).unwrap();
-    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
-    writeln!(writer, "pub struct RSA {{ pub session_key: U512, pub modulus: U512, pub totient: U512, pub exponent: U256, pub private_key: U512}}\n").unwrap();
-    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
-    writeln!(writer, "pub struct Point {{ pub x: U256, pub y: U256}}\n").unwrap();
-    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
-    writeln!(writer, "pub struct EccCurve {{ pub a: U256, pub b: U256, pub p: U256,  pub generator: Point}}\n").unwrap();
-    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
-    writeln!(writer, "pub struct ECC {{ pub curve: EccCurve, pub private_key1: U256, pub private_key2: U256}}\n").unwrap();
-    writeln!(writer, "#[derive(Clone, Copy)]").unwrap();
-    writeln!(writer, "pub struct KeySize {{ pub bits: u16, pub rsa: RSA, pub ecc: ECC}}\n").unwrap();
+    let mut w = BufWriter::new(file);
 
-    const TOTAL_TRIALS: usize = ((PRIME_RANGE[1] - PRIME_RANGE[0]) / 8 + 1) as usize * TRIALS as usize;
-    let mut lookup: [Option<KeySize>; TOTAL_TRIALS] = [const { None }; TOTAL_TRIALS];
-    let mut index = 0usize;
-    
-    let seed_base = U512::from(SEED);
-    for bits in PRIME_RANGE[0]..=PRIME_RANGE[1] {
-        if bits % 8 != 0 { continue; }
-        let min = U512::one() << (bits - 1);
-        let max = (U512::one() << bits) - U512::one();
-        let bits_u512 = U512::from(bits);
-        
-        let seed_mult = if let Some(product) = seed_base.checked_mul(bits_u512) {
-            product.overflowing_mul(U512::from(6364136223846793005u64)).0
-        } else {
-            mul_mod(seed_base, bits_u512, U512::MAX)
-        };
-        let seed_add = seed_mult.overflowing_add(U512::from(1442695040888963407u64)).0;
-        let range_size = max - min + U512::one();
-        let mut candidate = min + (seed_add % range_size);
-        candidate = candidate | min;
+    writeln!(w, "// This file is auto-generated. Do not edit manually.").unwrap();
+    writeln!(w, "use crypto_bigint::{{U256, U1024, U2048}};\n").unwrap();
 
-        let mut seed2 = U512::from(SEED) + U512::from(bits as u64);
-        
-        for _ in 0..TRIALS {
-            let p1 = next_safe_prime(candidate, bits, min, max);
-            candidate = p1 + U512::from(4);
-            let p2 = next_safe_prime(candidate, bits, min, max);
-            candidate = p2 + U512::from(4);
-            let p3 = next_safe_prime(candidate, bits, min, max);
-            candidate = p3 + U512::from(4);
-            
-            let rsa = generate_rsa(p1, p2, &mut seed2);
-            let rsa_private_key = mod_inverse(u256_to_u512(rsa.exponent), rsa.totient).unwrap_or_else(|| {
-                mod_inverse(U512::from(3), rsa.totient).unwrap_or(U512::one())
-            });
-            let ecc = generate_ecc(p3, rsa_private_key, &mut seed2);
-            lookup[index] = Some(KeySize { bits, rsa, ecc });
-            index += 1;
-        }
-        println!("{} bits trials generated", bits);
+    writeln!(w, "// curve: y^2 = x^3 + ax + b (mod p)").unwrap();
+    writeln!(w, "pub const CURVE_A: U256 = {};", fmt_u256(&BigUint::from(2u32))).unwrap();
+    writeln!(w, "pub const CURVE_B: U256 = {};", fmt_u256(&BigUint::from(3u32))).unwrap();
+    writeln!(w, "pub const TRIALS: u8 = {};\n", TRIALS).unwrap();
+
+    // Conversion table
+    writeln!(w, "pub const ECC_V_RSA: [(u16, u16); {}] = [", ECC_V_RSA.len()).unwrap();
+    for &(ecc, rsa) in &ECC_V_RSA {
+        writeln!(w, "    ({}, {}),", ecc, rsa).unwrap();
     }
-        
-    // write lookup array to file
-    writeln!(writer, "// Array of all KeySize structs\npub const LOOKUP_TABLE: [KeySize; {}] = [", index).unwrap();
-    
-    for i in 0..TOTAL_TRIALS {
-        if let Some(ref keysize) = lookup[i] {
-            writeln!(writer, "    KeySize {{").unwrap();
-            writeln!(writer, "        bits: {},", keysize.bits).unwrap();
-            writeln!(writer, "        rsa: {},", fmt_rsa(&keysize.rsa)).unwrap();
-            writeln!(writer, "        ecc: {}", fmt_ecc(&keysize.ecc)).unwrap();
-            if i < index - 1 {
-                writeln!(writer, "    }},").unwrap();
-            } else {
-                writeln!(writer, "    }}").unwrap();
-            }
-        }
+    writeln!(w, "];\n").unwrap();
+
+    // Struct definitions
+    writeln!(w, "#[derive(Clone, Copy)]").unwrap();
+    writeln!(w, "pub struct RSA {{ pub session_key: U2048, pub exponent: U256, pub p: U1024, pub q: U1024 }}\n").unwrap();
+    writeln!(w, "#[derive(Clone, Copy)]").unwrap();
+    writeln!(w, "pub struct Point {{ pub x: U256, pub y: U256 }}\n").unwrap();
+    writeln!(w, "#[derive(Clone, Copy)]").unwrap();
+    writeln!(w, "pub struct EccCurve {{ pub a: U256, pub b: U256, pub p: U256, pub generator: Point }}\n").unwrap();
+    writeln!(w, "#[derive(Clone, Copy)]").unwrap();
+    writeln!(w, "pub struct ECC {{ pub curve: EccCurve, pub private_key1: U256, pub private_key2: U256 }}\n").unwrap();
+    writeln!(w, "#[derive(Clone, Copy)]").unwrap();
+    writeln!(w, "pub struct KeySize {{ pub ecc_bits: u16, pub rsa_bits: u16, pub rsa: RSA, pub ecc: ECC }}\n").unwrap();
+
+    // Lookup array
+    writeln!(w, "pub const LOOKUP_TABLE: [KeySize; {}] = [", entries.len()).unwrap();
+    for (i, e) in entries.iter().enumerate() {
+        let comma = if i < entries.len() - 1 { "," } else { "" };
+        writeln!(w, "    KeySize {{").unwrap();
+        writeln!(w, "        ecc_bits: {},", e.ecc_bits).unwrap();
+        writeln!(w, "        rsa_bits: {},", e.rsa_bits).unwrap();
+        writeln!(w, "        rsa: RSA {{").unwrap();
+        writeln!(w, "            session_key: {},", fmt_u2048(&e.session_key)).unwrap();
+        writeln!(w, "            exponent: {},", fmt_u256(&e.exponent)).unwrap();
+        writeln!(w, "            p: {},", fmt_u1024(&e.p)).unwrap();
+        writeln!(w, "            q: {}", fmt_u1024(&e.q)).unwrap();
+        writeln!(w, "        }},").unwrap();
+        writeln!(w, "        ecc: ECC {{").unwrap();
+        writeln!(w, "            curve: EccCurve {{").unwrap();
+        writeln!(w, "                a: CURVE_A, b: CURVE_B,").unwrap();
+        writeln!(w, "                p: {},", fmt_u256(&e.ecc_prime)).unwrap();
+        writeln!(w, "                generator: Point {{ x: {}, y: {} }}", fmt_u256(&e.gen_x), fmt_u256(&e.gen_y)).unwrap();
+        writeln!(w, "            }},").unwrap();
+        writeln!(w, "            private_key1: {},", fmt_u256(&e.ecc_private_key1)).unwrap();
+        writeln!(w, "            private_key2: {}", fmt_u256(&e.ecc_private_key2)).unwrap();
+        writeln!(w, "        }}").unwrap();
+        writeln!(w, "    }}{}", comma).unwrap();
     }
-    
-    writeln!(writer, "];").unwrap();
-    writer.flush().unwrap();
-    println!("Generated lookup.rs successfully with {} KeySize structs!", index);
+    writeln!(w, "];").unwrap();
+
+    w.flush().unwrap();
+    println!(
+        "Generated lookup.rs with {} KeySize entries ({} key-size pairs x {} trials)",
+        entries.len(),
+        ECC_V_RSA.len(),
+        TRIALS
+    );
 }

@@ -1,5 +1,9 @@
 **/debug/
 **/target/
+**/__pycache__/
+nohup.out
+*.log
+*.log.*
 Cargo.lock
 .vscode/*
 lookup.rs

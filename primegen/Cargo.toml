@@ -1,7 +1,10 @@
 [package]
 name = "primegen"
-version = "0.1.0"
+version = "2.4.1"
 edition = "2024"
 
 [dependencies]
-primitive-types = "0.12"
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"
+rayon = "1"

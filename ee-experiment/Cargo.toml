@@ -1,6 +1,6 @@
 [package]
-name = "EE_experiment"
-version = "0.1.0"
+name = "ee-experiment"
+version = "2.4.1"
 edition = "2024"
 license = "MIT"
 
@@ -20,8 +20,8 @@ usb-device = "0.3"
 usbd-serial = "0.2"
 linked_list_allocator = "0.10"
 
-# U512
-primitive-types = { version = "0.12", default-features = false }
+# big integers + modular arithmetic
+crypto-bigint = { version = "0.5", default-features = false }
 
 [profile.release]
 lto = "fat"
