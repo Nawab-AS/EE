@@ -69,7 +69,7 @@ cd ~/ee/ee-experiment
 1) Connect the pico via USB normally
 
 2) Run the data receiver code
-This will automatically initialize the serial connection and when finished, will parse all data into a ``.csv` file.
+This will automatically initialize the serial connection and when finished, will parse all data into a `.csv` file.
 ```bash
 python ./main.py
 ```
