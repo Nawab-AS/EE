@@ -25,7 +25,7 @@ git clone https://github.com/nawab-as/ee.git
 The generated lookup table will be a relatively large file (~220kb, although very compressible) and hence is not included in this repo.
 Additionally, this should be run on a separate computer than the Pico as the generated prime numbers are seeded and will not be manipulated by CPU architecture or OS, and also due to the fact that the Pico doesn't have any built-in filesystem drivers.
 
-1) Navigate to the `/primegen` directory
+1) Navigate to the `~/ee/primegen` directory
 ```bash
 cd ~/ee/primegen
 ```
@@ -42,7 +42,7 @@ cp ~/ee/primegen/lookup.rs ~/ee/ee-experiment/src/lookup.rs
 
 
 ### Part 3: Compiling and flashing to the Pico
-1) Navigate to the `/ee-experiment` directory
+1) Navigate to the `~/ee/ee-experiment` directory
 ```bash
 cd ~/ee/ee-experiment
 ```
@@ -62,7 +62,7 @@ cargo run --release
 ```
 
 ### Part 4: Recording data
-1) Navigate to the `~/data-receiver` directory
+1) Navigate to the `~/ee/data-receiver` directory
 ```bash
 cd ~/ee/data-receiver
 ```
@@ -75,4 +75,5 @@ This will automatically initialize the serial connection and, when finished, wil
 ```bash
 python ./main.py
 ```
+
 
