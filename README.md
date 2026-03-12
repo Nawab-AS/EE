@@ -9,7 +9,7 @@ Refer to EE for methodology behind code.
 - Python
 - Python `pyserial` library
 - `picotool` cli
-- Raspberry pi pico 2 (rp2350)
+- Raspberry Pi Pico 2 (RP2350)
 
 
 ## How to use
@@ -22,8 +22,8 @@ git clone https://github.com/nawab-as/ee.git
 
 
 ### Part 2: Generating the prime lookup table
-The generated lookup table will be a relativiely large file (~220kb, although very compressible) and hence is not included in this repo.
-Additionally, this should be run on a seperate computer than the pico as the generated prime numbers are seeded and will not be manipulated by cpu architecture or OS and also due to the fact that the pico doesn't have and built-in filesystem drivers.
+The generated lookup table will be a relatively large file (~220kb, although very compressible) and hence is not included in this repo.
+Additionally, this should be run on a separate computer than the Pico as the generated prime numbers are seeded and will not be manipulated by CPU architecture or OS, and also due to the fact that the Pico doesn't have any built-in filesystem drivers.
 
 1) Navigate to the `/primegen` directory
 ```bash
@@ -41,7 +41,7 @@ cp ~/ee/primegen/lookup.rs ~/ee/ee-experiment/src/lookup.rs
 ```
 
 
-### Part 3: Compiling and flashing to the pico
+### Part 3: Compiling and flashing to the Pico
 1) Navigate to the `/ee-experiment` directory
 ```bash
 cd ~/ee/ee-experiment
@@ -52,24 +52,27 @@ cd ~/ee/ee-experiment
 rustup target add thumbv8m.main-none-eabihf
 ```
 
-3) Plug in the pico in BOOTSEL via USB
+3) Plug in the Pico in BOOTSEL via USB
 
-4) Compile and run the rust project
-The release build is configured to use `picotool` to flash and run automatically after it is compiled.
+4) Compile and run the Rust project
+
+The release build is configured to use `picotool` to flash and run automatically after compilation.
 ```bash
 cargo run --release
 ```
 
-### Part 3: Recording data
+### Part 4: Recording data
 1) Navigate to the `~/data-receiver` directory
 ```bash
-cd ~/ee/ee-experiment
+cd ~/ee/data-receiver
 ```
 
-1) Connect the pico via USB normally
+2) Connect the Pico via USB normally
 
-2) Run the data receiver code
-This will automatically initialize the serial connection and when finished, will parse all data into a `.csv` file.
+3) Run the data receiver code
+
+This will automatically initialize the serial connection and, when finished, will parse all data into a `.csv` file.
 ```bash
 python ./main.py
 ```
+
