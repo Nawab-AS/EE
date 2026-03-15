@@ -1,4 +1,5 @@
 # Extended Essay
+![Hackatime stats](https://hackatime-badge.hackclub.com/U0857UWECTS/ee)
 
 The source code for my IBDP computer science EE.
 Refer to EE for methodology behind code.
